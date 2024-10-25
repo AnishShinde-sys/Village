@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Application Information -->
+    <key>CFBundleName</key>
+    <string>Village</string>
+    <key>CFBundleDisplayName</key>
+    <string>Village</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.anishshinde.test3</string> <!-- Replace with your bundle identifier -->
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+
+    <!-- Device Capabilities -->
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>location-services</string>
+        <string>gps</string>
+    </array>
+
+    <!-- App Permissions and Descriptions -->
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>This app requires access to your location to share it with your village members.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>This app requires continuous access to your location to keep your village updated.</string>
+    <key>NSLocationAlwaysUsageDescription</key>
+    <string>This app needs your location even when in the background to ensure safety features work properly.</string>
+    <key>NSUserTrackingUsageDescription</key>
+    <string>This app does not track users.</string>
+
+
+    <!-- Background Modes -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>location</string>
+        <string>remote-notification</string>
+    </array>
+
+    <!-- Push Notifications -->
+    <key>FirebaseAppDelegateProxyEnabled</key>
+    <false/>
+    <key>UIBackgroundFetchIntervalMinimum</key>
+    <real>-1</real>
+
+    <!-- ATS Settings -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+
+    <!-- Supported Interface Orientations -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>Your app needs access to your location to share it with your village.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Your app needs access to your location to share it with your village.</string>
+
+    <!-- Bundle Icons -->
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>AppIcon</string>
+            </array>
+            <key>UIPrerenderedIcon</key>
+            <false/>
+        </dict>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,1716 @@
+import SwiftUI
+import Firebase
+
+
+struct AddPersonView: View {
+    @Environment(\.presentationMode) var presentationMode
+    @EnvironmentObject var session: SessionStore
+    @State private var email = ""
+    @State private var errorMessage = ""
+    @State private var showError = false
+
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                TextField("Email of the person to add", text: $email)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .keyboardType(.emailAddress)
+                    .autocapitalization(.none)
+                    .padding()
+
+
+                Button(action: {
+                    addPerson()
+                }) {
+                    Text("Add Person")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding()
+                        .frame(width: 220, height: 60)
+                        .background(Color.blue)
+                        .cornerRadius(15.0)
+                }
+
+
+                if showError {
+                    Text(errorMessage)
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+
+
+                Spacer()
+            }
+            .navigationTitle("Add Person")
+            .navigationBarItems(trailing: Button("Cancel") {
+                presentationMode.wrappedValue.dismiss()
+            })
+        }
+    }
+
+
+    func addPerson() {
+        guard let villageID = session.villageID else { return }
+        let db = Firestore.firestore()
+
+
+        // Fetch user by email
+        db.collection("users").whereField("email", isEqualTo: email).getDocuments { snapshot, error in
+            if let error = error {
+                self.errorMessage = "Error finding user: \(error.localizedDescription)"
+                self.showError = true
+                return
+            }
+
+
+            guard let documents = snapshot?.documents, !documents.isEmpty else {
+                self.errorMessage = "No user found with that email."
+                self.showError = true
+                return
+            }
+
+
+            let userData = documents[0].data()
+            let uid = userData["uid"] as? String ?? ""
+            let name = userData["name"] as? String ?? "Unknown"
+            let isParent = userData["isParent"] as? Bool ?? false
+
+
+            if isParent {
+                // Add parent to village's parents collection
+                db.collection("villages").document(villageID).collection("parents").document(uid).setData([
+                    "uid": uid,
+                    "name": name,
+                    "email": email,
+                    "fcmToken": userData["fcmToken"] as? String ?? ""
+                ]) { error in
+                    if let error = error {
+                        self.errorMessage = "Error adding parent: \(error.localizedDescription)"
+                        self.showError = true
+                    } else {
+                        self.presentationMode.wrappedValue.dismiss()
+                    }
+                }
+            } else {
+                // Add kid to village's kids collection
+                db.collection("villages").document(villageID).collection("kids").document(uid).setData([
+                    "uid": uid,
+                    "name": name,
+                    "email": email
+                ]) { error in
+                    if let error = error {
+                        self.errorMessage = "Error adding kid: \(error.localizedDescription)"
+                        self.showError = true
+                    } else {
+                        self.presentationMode.wrappedValue.dismiss()
+                    }
+                }
+            }
+
+
+            // Update user's villageID
+            db.collection("users").document(uid).updateData([
+                "villageID": villageID
+            ]) { error in
+                if let error = error {
+                    print("Error updating user's villageID: \(error.localizedDescription)")
+                } else {
+                    print("User's villageID updated.")
+                }
+            }
+        }
+    }
+}
+
+import SwiftUI
+import Firebase
+
+struct AlertsView: View {
+    @Binding var alerts: [AlertItem]
+    @EnvironmentObject var session: SessionStore
+    
+    var body: some View {
+        NavigationView {
+            List(alerts) { alert in
+                VStack(alignment: .leading) {
+                    Text("\(alert.kidName) is \(alert.status)!")
+                        .font(.headline)
+                    Text("Time: \(alert.timestamp.formatted())")
+                        .font(.subheadline)
+                    HStack {
+                        if let response = alert.responders[session.user?.uid ?? ""] {
+                            Text(response ? "You have responded: Yes" : "You have responded: No")
+                                .foregroundColor(response ? .green : .red)
+                        } else {
+                            Button(action: {
+                                respondToAlert(alertID: alert.id, response: true)
+                            }) {
+                                Text("Yes, I can respond")
+                                    .foregroundColor(.green)
+                            }
+                            Button(action: {
+                                respondToAlert(alertID: alert.id, response: false)
+                            }) {
+                                Text("No, I can't respond")
+                                    .foregroundColor(.red)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Alerts")
+        }
+    }
+    
+    func respondToAlert(alertID: String, response: Bool) {
+        let db = Firestore.firestore()
+        guard let userID = session.user?.uid else { return }
+        db.collection("alerts").document(alertID).updateData([
+            "responders.\(userID)": response
+        ]) { error in
+            if let error = error {
+                print("Error responding to alert: \(error.localizedDescription)")
+            }
+        }
+    }
+}
+
+struct AlertItem: Identifiable {
+    var id: String
+    var kidID: String
+    var status: String
+    var timestamp: Date
+    var responders: [String: Bool]
+    
+    var kidName: String {
+        // For simplicity, return a placeholder name
+        return "Child"
+    }
+}
+import UIKit
+import Firebase
+import FirebaseAppCheck
+import UserNotifications
+import FirebaseMessaging
+
+class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate, MessagingDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions
+        launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        FirebaseApp.configure()
+
+        // Use the App Check Debug Provider for development
+        let providerFactory = AppCheckDebugProviderFactory()
+        AppCheck.setAppCheckProviderFactory(providerFactory)
+
+        // Request notification permissions
+        UNUserNotificationCenter.current().delegate = self
+        requestNotificationPermission()
+
+        Messaging.messaging().delegate = self
+        application.registerForRemoteNotifications()
+
+        return true
+    }
+
+    func requestNotificationPermission() {
+        let options: UNAuthorizationOptions = [.alert, .sound, .badge]
+        UNUserNotificationCenter.current().requestAuthorization(options: options) { granted, error in
+            if let error = error {
+                print("Error requesting notification permissions: \(error.localizedDescription)")
+            } else if granted {
+                print("Notification permissions granted.")
+            } else {
+                print("Notification permissions denied.")
+            }
+        }
+    }
+
+    // Handle incoming notifications while app is in foreground
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler:
+                                    @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound, .badge])
+    }
+
+    // Handle notification tap
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        completionHandler()
+    }
+
+    // Handle FCM token refresh
+    func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
+        print("Firebase registration token: \(String(describing: fcmToken))")
+        // Optionally, send token to application server.
+    }
+}
+import Foundation
+import CoreLocation
+import Firebase
+
+class AppLocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published var location: CLLocation?
+    private let manager = CLLocationManager()
+    private var userID: String?
+    private var userName: String?
+    private var villageID: String?
+    private let db = Firestore.firestore()
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.requestAlwaysAuthorization()
+    }
+
+    func setUserID(_ id: String, name: String) {
+        self.userID = id
+        self.userName = name
+    }
+
+    func setVillageID(_ id: String) {
+        self.villageID = id
+    }
+
+    func startUpdating() {
+        manager.startUpdatingLocation()
+    }
+
+    func stopUpdating() {
+        manager.stopUpdatingLocation()
+    }
+
+    // CLLocationManagerDelegate Methods
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last, let userID = self.userID else { return }
+        self.location = location
+
+        // Upload location to Firestore
+        uploadLocation(location)
+    }
+
+    func uploadLocation(_ location: CLLocation) {
+        guard let userID = self.userID else { return }
+        db.collection("locations").document(userID).setData([
+            "latitude": location.coordinate.latitude,
+            "longitude": location.coordinate.longitude,
+            "timestamp": Timestamp(),
+            "userID": userID,
+            "name": userName ?? "Unknown",
+            "villageID": villageID ?? ""
+        ], merge: true)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        print("Failed to get location: \(error.localizedDescription)")
+    }
+}
+import Foundation
+
+struct AppUser: Identifiable {
+    var id: String
+    var name: String
+    var email: String
+    // Add other properties as needed
+}
+import SwiftUI
+import Firebase
+import FirebaseAuth
+
+class AuthViewModel: ObservableObject {
+    @Published var userSession: FirebaseAuth.User?
+    @Published var user: AppUser?
+    
+    init() {
+        userSession = Auth.auth().currentUser
+        fetchUser()
+    }
+    
+    func login(email: String, password: String) {
+        Auth.auth().signIn(withEmail: email, password: password) { [weak self] result, error in
+            if let error = error {
+                print("Failed to login: \(error.localizedDescription)")
+                return
+            }
+            guard let self = self else { return }
+            self.userSession = result?.user
+            self.fetchUser()
+        }
+    }
+    
+    func register(email: String, password: String, name: String) {
+        Auth.auth().createUser(withEmail: email, password: password) { [weak self] result, error in
+            if let error = error {
+                print("Failed to register: \(error.localizedDescription)")
+                return
+            }
+            guard let self = self else { return }
+            guard let user = result?.user else { return }
+            let data = ["email": email, "name": name, "uid": user.uid]
+            Firestore.firestore().collection("users").document(user.uid).setData(data) { error in
+                if let error = error {
+                    print("Failed to upload user data: \(error.localizedDescription)")
+                    return
+                }
+                self.userSession = user
+                self.fetchUser()
+            }
+        }
+    }
+    
+    func signOut() {
+        do {
+            try Auth.auth().signOut()
+            self.userSession = nil
+            self.user = nil
+        } catch let error {
+            print("Error signing out: \(error.localizedDescription)")
+        }
+    }
+    
+    func fetchUser() {
+        guard let uid = self.userSession?.uid else { return }
+        Firestore.firestore().collection("users").document(uid).getDocument { [weak self] snapshot, error in
+            if let error = error {
+                print("Failed to fetch user: \(error.localizedDescription)")
+                return
+            }
+            guard let self = self else { return }
+            guard let data = snapshot?.data() else { return }
+            self.user = AppUser(
+                id: uid,
+                name: data["name"] as? String ?? "",
+                email: data["email"] as? String ?? ""
+            )
+        }
+    }
+}
+import SwiftUI
+
+struct ContentView: View {
+    @EnvironmentObject var session: SessionStore
+
+    var body: some View {
+        Group {
+            if !session.isSignedIn {
+                SignInSignUpView()
+                    .onAppear {
+                        print("ContentView: Showing SignInSignUpView")
+                    }
+            } else if !session.isUserDataLoaded {
+                LoadingView()
+                    .onAppear {
+                        print("ContentView: Loading user data...")
+                    }
+            } else {
+                if session.isParent {
+                    ParentMainView()
+                        .onAppear {
+                            print("ContentView: Showing ParentMainView")
+                        }
+                } else {
+                    KidMainView()
+                        .onAppear {
+                            print("ContentView: Showing KidMainView")
+                        }
+                }
+            }
+        }
+        .onAppear {
+            print("ContentView: Current state - isSignedIn: \(session.isSignedIn), isUserDataLoaded: \(session.isUserDataLoaded), isParent: \(session.isParent)")
+        }
+    }
+}
+
+struct LoadingView: View {
+    var body: some View {
+        VStack {
+            Text("Loading...")
+            ProgressView()
+        }
+    }
+}
+import SwiftUI
+import Firebase
+
+struct KidHomeView: View {
+    @EnvironmentObject var session: SessionStore
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Select an Option")
+                .font(.headline)
+            Button(action: {
+                sendNotification(type: "Got Hurt")
+            }) {
+                Text("Got Hurt")
+                    .font(.title2)
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color.red)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+            }
+            Button(action: {
+                sendNotification(type: "Unsafe")
+            }) {
+                Text("Unsafe")
+                    .font(.title2)
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color.orange)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+            }
+            Button(action: {
+                sendNotification(type: "Emergency")
+            }) {
+                Text("Emergency")
+                    .font(.title2)
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color.purple)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+            }
+            Button(action: {
+                sendNotification(type: "Reached Home")
+            }) {
+                Text("Reached Home")
+                    .font(.title2)
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+            }
+            Spacer()
+        }
+        .padding()
+    }
+
+    func sendNotification(type: String) {
+        guard let user = session.user,
+              let villageID = session.villageID,
+              let name = session.userData["name"] as? String else {
+            print("Missing user data")
+            return
+        }
+
+        let db = Firestore.firestore()
+
+        // Fetch parent tokens in the village
+        db.collection("villages").document(villageID).collection("parents").getDocuments { snapshot, error in
+            if let error = error {
+                print("Error fetching parents: \(error.localizedDescription)")
+                return
+            }
+
+            let parentTokens = snapshot?.documents.compactMap { $0.data()["fcmToken"] as? String } ?? []
+
+            // Send notification to each parent
+            for token in parentTokens {
+                sendFCMNotification(to: token, title: "\(name) - \(type)", body: "Your child \(name) reported: \(type)")
+            }
+        }
+    }
+
+    func sendFCMNotification(to token: String, title: String, body: String) {
+        let urlString = "https://fcm.googleapis.com/fcm/send"
+        let url = URL(string: urlString)!
+
+        let parameters: [String: Any] = [
+            "to": token,
+            "notification": [
+                "title": title,
+                "body": body
+            ]
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        // Replace 'YOUR_SERVER_KEY' with your actual FCM server key
+        request.setValue("key=YOUR_SERVER_KEY", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let data = try? JSONSerialization.data(withJSONObject: parameters, options: [])
+
+        let task = URLSession.shared.uploadTask(with: request, from: data) { responseData, response, error in
+            if let error = error {
+                print("Error sending notification: \(error.localizedDescription)")
+                return
+            }
+            print("Notification sent successfully.")
+        }
+        task.resume()
+    }
+}
+import SwiftUI
+import CoreLocation
+import Firebase
+
+struct KidLocationSharingView: View {
+    @StateObject var locationManager = AppLocationManager()
+    @EnvironmentObject var session: SessionStore
+
+    var body: some View {
+        VStack {
+            if let location = locationManager.location {
+                Text("Your location is being shared.")
+                Text("Latitude: \(location.coordinate.latitude)")
+                Text("Longitude: \(location.coordinate.longitude)")
+            } else {
+                Text("Fetching location...")
+            }
+        }
+        .onAppear {
+            if let userID = session.user?.uid {
+                let userName = session.userData["name"] as? String ?? "Unknown"
+                locationManager.setUserID(userID, name: userName)
+                fetchVillageID()
+            }
+        }
+    }
+
+    func fetchVillageID() {
+        let db = Firestore.firestore()
+        if let userID = session.user?.uid {
+            db.collection("users").document(userID).getDocument { document, error in
+                if let document = document, document.exists {
+                    let data = document.data()
+                    let villageID = data?["villageID"] as? String ?? ""
+                    locationManager.setVillageID(villageID)
+                }
+            }
+        }
+    }
+}
+//
+//  KidLocationView.swift
+//  VillageApp
+//
+//  Created by Anish Shinde on 10/24/24.
+//
+
+
+// KidLocationView.swift
+
+import SwiftUI
+import MapKit
+import Firebase
+import CoreLocation
+
+struct KidLocationView: View {
+    @StateObject private var locationManager = KidLocationManager()
+    @EnvironmentObject var session: SessionStore
+
+    var body: some View {
+        VStack {
+            if let location = locationManager.currentLocation {
+                Map(coordinateRegion: .constant(MKCoordinateRegion(
+                    center: location.coordinate,
+                    span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                )))
+                .edgesIgnoringSafeArea(.all)
+            } else {
+                Text("Obtaining location...")
+            }
+        }
+        .onAppear {
+            locationManager.startUpdatingLocation()
+            locationManager.session = session
+        }
+    }
+}
+
+class KidLocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published var currentLocation: CLLocation?
+    private var locationManager = CLLocationManager()
+    var session: SessionStore?
+
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+    }
+
+    func startUpdatingLocation() {
+        locationManager.requestAlwaysAuthorization()
+        locationManager.startUpdatingLocation()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        switch status {
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.startUpdatingLocation()
+        case .denied, .restricted:
+            print("Location access denied.")
+        default:
+            break
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last, let session = session else { return }
+        currentLocation = location
+
+        // Update location to Firestore
+        let db = Firestore.firestore()
+        if let userID = session.user?.uid {
+            db.collection("locations").document(userID).setData([
+                "userID": userID,
+                "name": session.userData["name"] as? String ?? "Unknown",
+                "latitude": location.coordinate.latitude,
+                "longitude": location.coordinate.longitude,
+                "timestamp": Timestamp(date: Date())
+            ]) { error in
+                if let error = error {
+                    print("Error updating location: \(error.localizedDescription)")
+                } else {
+                    print("Location updated successfully.")
+                }
+            }
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        print("Failed to get user location: \(error.localizedDescription)")
+    }
+}
+import SwiftUI
+
+struct KidMainView: View {
+    var body: some View {
+        TabView {
+            KidHomeView()
+                .tabItem {
+                    Label("Home", systemImage: "house")
+                }
+            VillageView()
+                .tabItem {
+                    Label("Village", systemImage: "person.3")
+                }
+            SettingsView()
+                .tabItem {
+                    Label("Settings", systemImage: "gear")
+                }
+        }
+    }
+}
+
+struct KidMainView_Previews: PreviewProvider {
+    static var previews: some View {
+        KidMainView()
+    }
+}
+// LocationManager.swift
+
+import Foundation
+import CoreLocation
+import Firebase
+
+class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published var location: CLLocation?
+    private let manager = CLLocationManager()
+    private var userID: String?
+    private var villageID: String?
+    private var db = Firestore.firestore()
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.requestAlwaysAuthorization()
+        manager.startUpdatingLocation()
+    }
+
+    func setUserID(_ id: String) {
+        self.userID = id
+    }
+
+    func setVillageID(_ id: String) {
+        self.villageID = id
+    }
+
+    func startUpdating() {
+        manager.startUpdatingLocation()
+    }
+
+    func stopUpdating() {
+        manager.stopUpdatingLocation()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last, let userID = self.userID else { return }
+        self.location = location
+
+        // Upload location to Firestore
+        db.collection("locations").document(userID).setData([
+            "latitude": location.coordinate.latitude,
+            "longitude": location.coordinate.longitude,
+            "timestamp": Timestamp(),
+            "userID": userID,
+            "villageID": villageID ?? ""
+        ], merge: true)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        print("Failed to get location: \(error.localizedDescription)")
+    }
+}
+import SwiftUI
+import MapKit
+import Firebase
+
+struct MapView: View {
+    @EnvironmentObject var session: SessionStore
+    @State private var region = MKCoordinateRegion()
+    @State private var kidsLocations: [KidLocation] = []
+
+    var body: some View {
+        Map(coordinateRegion: $region, annotationItems: kidsLocations) { kid in
+            MapAnnotation(coordinate: kid.coordinate) {
+                VStack {
+                    Image(systemName: "mappin.circle.fill")
+                        .foregroundColor(.red)
+                        .font(.title)
+                    Text(kid.name)
+                        .font(.caption)
+                        .padding(5)
+                        .background(Color.white.opacity(0.7))
+                        .cornerRadius(5)
+                }
+            }
+        }
+        .onAppear {
+            print("MapView: Fetching kids locations")
+            fetchKidsLocations()
+        }
+    }
+
+    func fetchKidsLocations() {
+        let db = Firestore.firestore()
+        guard let villageID = session.villageID else {
+            print("MapView: session.villageID is nil")
+            return
+        }
+        print("MapView: Using villageID \(villageID)")
+        db.collection("villages").document(villageID).collection("kids")
+            .addSnapshotListener { snapshot, error in
+                if let error = error {
+                    print("Error fetching kids: \(error.localizedDescription)")
+                    return
+                }
+                let kidIDs = snapshot?.documents.map { $0.documentID } ?? []
+                fetchLocations(for: kidIDs)
+            }
+    }
+
+    func fetchLocations(for kidIDs: [String]) {
+        let db = Firestore.firestore()
+        if kidIDs.isEmpty {
+            self.kidsLocations = []
+            return
+        }
+        db.collection("locations")
+            .whereField("userID", in: kidIDs)
+            .addSnapshotListener { snapshot, error in
+                if let error = error {
+                    print("Error fetching locations: \(error.localizedDescription)")
+                    return
+                }
+
+                guard let documents = snapshot?.documents else { return }
+
+                var locations: [KidLocation] = []
+                for document in documents {
+                    let data = document.data()
+                    guard
+                        let name = data["name"] as? String,
+                        let latitude = data["latitude"] as? Double,
+                        let longitude = data["longitude"] as? Double
+                    else {
+                        continue
+                    }
+
+                    let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+                    let kidLocation = KidLocation(id: document.documentID, name: name, coordinate: coordinate)
+                    locations.append(kidLocation)
+                }
+
+                DispatchQueue.main.async {
+                    self.kidsLocations = locations
+                    updateRegion()
+                }
+            }
+    }
+
+    func updateRegion() {
+        guard !kidsLocations.isEmpty else {
+            // Set a default region if no kids are present
+            region = MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
+                span: MKCoordinateSpan(latitudeDelta: 0.5, longitudeDelta: 0.5)
+            )
+            return
+        }
+
+        let latitudes = kidsLocations.map { $0.coordinate.latitude }
+        let longitudes = kidsLocations.map { $0.coordinate.longitude }
+
+        let minLat = latitudes.min()!
+        let maxLat = latitudes.max()!
+        let minLon = longitudes.min()!
+        let maxLon = longitudes.max()!
+
+        let centerLat = (minLat + maxLat) / 2
+        let centerLon = (minLon + maxLon) / 2
+
+        let spanLat = (maxLat - minLat) * 1.5
+        let spanLon = (maxLon - minLon) * 1.5
+
+        region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: centerLat, longitude: centerLon),
+            span: MKCoordinateSpan(latitudeDelta: spanLat, longitudeDelta: spanLon)
+        )
+    }
+}
+// Models.swift
+
+import Foundation
+import CoreLocation
+
+struct KidLocation: Identifiable {
+    let id: String
+    let name: String
+    let coordinate: CLLocationCoordinate2D
+}
+
+struct ParentUser: Identifiable {
+    let id: String
+    let name: String
+    let email: String
+}
+
+struct Kid: Identifiable {
+    let id: String
+    let name: String
+    let email: String
+}
+
+struct Invitation: Identifiable {
+    var id: String
+    var parentName: String
+    var villageID: String
+}
+
+struct ParentInvitation: Identifiable {
+    var id: String
+    var fromParentName: String
+    var villageID: String
+}
+import SwiftUI
+
+struct ParentHomeView: View {
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                Text("Welcome to the Parent Dashboard")
+                    .font(.largeTitle)
+                    .padding()
+
+                // Add additional content here, such as buttons or information
+                // For example:
+                Text("Here you can manage your village and keep track of your kids.")
+                    .font(.headline)
+                    .padding()
+
+                // Add navigation links or buttons to other features
+                // For example:
+                NavigationLink(destination: VillageView()) {
+                    Text("Go to Village")
+                        .font(.title2)
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                }
+                .padding(.horizontal)
+
+                Spacer()
+            }
+            .navigationTitle("Parent Home")
+        }
+    }
+}
+
+struct ParentHomeView_Previews: PreviewProvider {
+    static var previews: some View {
+        ParentHomeView()
+    }
+}
+import SwiftUI
+import Firebase
+
+struct ParentInvitationsView: View {
+    @EnvironmentObject var session: SessionStore
+    @State private var invitations: [ParentInvitation] = []
+    
+    var body: some View {
+        VStack {
+            List(invitations) { invitation in
+                HStack {
+                    Text("Invitation from \(invitation.fromParentName)")
+                    Spacer()
+                    Button("Accept") {
+                        acceptInvitation(invitation)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+                }
+            }
+        }
+        .onAppear {
+            fetchInvitations()
+        }
+        .navigationTitle("Parent Invitations")
+    }
+    
+    func fetchInvitations() {
+        let db = Firestore.firestore()
+        if let parentID = session.user?.uid {
+            db.collection("parent_invitations")
+                .whereField("toParentID", isEqualTo: parentID)
+                .whereField("status", isEqualTo: "pending")
+                .addSnapshotListener { snapshot, error in
+                    if let error = error {
+                        print("Error fetching invitations: \(error.localizedDescription)")
+                        return
+                    }
+                    invitations = snapshot?.documents.compactMap { document in
+                        let data = document.data()
+                        let id = document.documentID
+                        let fromParentName = data["fromParentName"] as? String ?? "Unknown"
+                        let villageID = data["villageID"] as? String ?? ""
+                        return ParentInvitation(id: id, fromParentName: fromParentName, villageID: villageID)
+                    } ?? []
+                }
+        }
+    }
+    
+    func acceptInvitation(_ invitation: ParentInvitation) {
+        let db = Firestore.firestore()
+        if let parentID = session.user?.uid,
+           let parentName = session.userData["name"] as? String,
+           let parentEmail = session.userData["email"] as? String {
+            db.collection("parent_invitations").document(invitation.id).updateData([
+                "status": "accepted"
+            ]) { error in
+                if let error = error {
+                    print("Error accepting invitation: \(error.localizedDescription)")
+                    return
+                }
+                // Add parent to village
+                db.collection("villages").document(invitation.villageID)
+                    .collection("parents").document(parentID).setData([
+                        "uid": parentID,
+                        "name": parentName,
+                        "email": parentEmail
+                    ]) { err in
+                        if let err = err {
+                            print("Error adding parent to village: \(err.localizedDescription)")
+                        } else {
+                            // Update parent's villageID
+                            db.collection("users").document(parentID).updateData([
+                                "villageID": invitation.villageID
+                            ]) { error in
+                                if let error = error {
+                                    print("Error updating parent's villageID: \(error.localizedDescription)")
+                                } else {
+                                    session.fetchUserData(uid: parentID)
+                                }
+                            }
+                        }
+                    }
+            }
+        }
+    }
+}
+import SwiftUI
+
+struct ParentMainView: View {
+    var body: some View {
+        NavigationView {
+            VStack {
+                Text("Welcome to the Parent Dashboard")
+                    .font(.largeTitle)
+                    .padding()
+
+                // Add additional content here
+                // For example, buttons to navigate to different features
+
+                Spacer()
+            }
+            .navigationTitle("Parent Dashboard")
+        }
+    }
+}
+
+import Foundation
+import FirebaseAuth
+import Firebase
+import FirebaseMessaging
+
+
+class SessionStore: ObservableObject {
+    @Published var user: FirebaseAuth.User?
+    @Published var isParent: Bool = false
+    @Published var userData: [String: Any] = [:]
+    @Published var isSignedIn: Bool = false
+    @Published var villageID: String?
+    @Published var isUserDataLoaded: Bool = false
+    var handle: AuthStateDidChangeListenerHandle?
+
+
+    init() {
+        print("SessionStore: Initializing")
+        listen()
+    }
+
+
+    func listen() {
+        print("SessionStore: Setting up auth listener")
+        if let handle = handle {
+            Auth.auth().removeStateDidChangeListener(handle)
+        }
+
+
+        handle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
+            guard let self = self else { return }
+            print("SessionStore: Auth state changed - User: \(user?.uid ?? "nil")")
+            self.user = user
+            if let user = user {
+                print("SessionStore: User is signed in, fetching user data")
+                self.fetchUserData(uid: user.uid)
+            } else {
+                print("SessionStore: User is signed out, resetting state")
+                self.resetState()
+            }
+        }
+    }
+
+
+    private func resetState() {
+        self.isParent = false
+        self.userData = [:]
+        self.villageID = nil
+        self.isSignedIn = false
+        self.isUserDataLoaded = false
+    }
+
+
+    func fetchUserData(uid: String) {
+        print("SessionStore: Fetching user data for uid: \(uid)")
+        let db = Firestore.firestore()
+        db.collection("users").document(uid).getDocument { [weak self] document, error in
+            guard let self = self else { return }
+
+
+            if let error = error {
+                print("SessionStore: Error fetching user data: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.resetState()
+                }
+                return
+            }
+
+
+            if let document = document, document.exists {
+                let data = document.data() ?? [:]
+                print("SessionStore: User data fetched: \(data)")
+
+
+                DispatchQueue.main.async {
+                    // Handle 'isParent' being stored as Bool, Int, or String
+                    if let isParentValue = data["isParent"] as? Bool {
+                        self.isParent = isParentValue
+                    } else if let isParentInt = data["isParent"] as? Int {
+                        self.isParent = isParentInt != 0
+                    } else if let isParentString = data["isParent"] as? String {
+                        self.isParent = (isParentString == "true")
+                    } else {
+                        self.isParent = false
+                    }
+
+
+                    self.userData = data
+                    self.villageID = data["villageID"] as? String
+                    print("SessionStore: isParent is \(self.isParent), villageID is \(self.villageID ?? "nil")")
+                    self.isSignedIn = true
+                    self.isUserDataLoaded = true
+                    self.saveFCMToken()
+                }
+            } else {
+                print("SessionStore: No user document found")
+                DispatchQueue.main.async {
+                    self.resetState()
+                }
+            }
+        }
+    }
+
+
+    func saveFCMToken() {
+        guard let user = user else { return }
+        let token = Messaging.messaging().fcmToken
+        let db = Firestore.firestore()
+        db.collection("users").document(user.uid).updateData([
+            "fcmToken": token ?? ""
+        ]) { error in
+            if let error = error {
+                print("Error saving FCM token: \(error.localizedDescription)")
+            } else {
+                print("FCM token saved successfully.")
+            }
+        }
+
+
+        // If user is a parent, also update the token in the village's parents collection
+        if isParent, let villageID = villageID {
+            db.collection("villages").document(villageID).collection("parents").document(user.uid).updateData([
+                "fcmToken": token ?? ""
+            ]) { error in
+                if let error = error {
+                    print("Error updating FCM token in village: \(error.localizedDescription)")
+                } else {
+                    print("FCM token updated in village.")
+                }
+            }
+        }
+    }
+
+
+    func signOut() {
+        print("SessionStore: Attempting to sign out")
+        do {
+            try Auth.auth().signOut()
+            print("SessionStore: Sign out successful")
+            self.resetState()
+            self.user = nil
+        } catch let error {
+            print("SessionStore: Error signing out: \(error.localizedDescription)")
+        }
+    }
+
+
+    deinit {
+        if let handle = handle {
+            Auth.auth().removeStateDidChangeListener(handle)
+        }
+    }
+}
+
+import SwiftUI
+
+struct SettingsView: View {
+    @EnvironmentObject var session: SessionStore
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section(header: Text("Account")) {
+                    Button(action: {
+                        session.signOut()
+                    }) {
+                        Text("Sign Out")
+                            .foregroundColor(.red)
+                    }
+                }
+
+                // Add more settings options here
+            }
+            .listStyle(GroupedListStyle())
+            .navigationTitle("Settings")
+        }
+    }
+}
+
+struct SettingsView_Previews: PreviewProvider {
+    static var previews: some View {
+        SettingsView()
+    }
+}
+
+import SwiftUI
+import FirebaseAuth
+import Firebase
+import FirebaseMessaging
+
+struct SignInSignUpView: View {
+    @State private var isSignIn = true
+    @State private var isParent = false
+    @State private var name = ""
+    @State private var email = ""
+    @State private var password = ""
+    @State private var errorMessage = ""
+    @State private var showError = false
+    @EnvironmentObject var session: SessionStore
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                Text("Village")
+                    .font(.largeTitle)
+                    .bold()
+
+                Picker(selection: $isSignIn, label: Text("Login or Register")) {
+                    Text("Sign In").tag(true)
+                    Text("Sign Up").tag(false)
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding()
+
+                if !isSignIn {
+                    Picker("Role", selection: $isParent) {
+                        Text("Kid").tag(false)
+                        Text("Parent").tag(true)
+                    }
+                    .pickerStyle(SegmentedPickerStyle())
+                    .padding()
+
+                    TextField("Name", text: $name)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .padding(.horizontal)
+                }
+
+                TextField("Email", text: $email)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .keyboardType(.emailAddress)
+                    .autocapitalization(.none)
+                    .padding(.horizontal)
+
+                SecureField("Password", text: $password)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .padding(.horizontal)
+
+                Button(action: {
+                    isSignIn ? signIn() : signUp()
+                }) {
+                    Text(isSignIn ? "Sign In" : "Sign Up")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding()
+                        .frame(width: 220, height: 60)
+                        .background(isSignIn ? Color.green : Color.blue)
+                        .cornerRadius(15.0)
+                }
+
+                if showError {
+                    Text(errorMessage)
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+
+                Spacer()
+            }
+            .navigationTitle(isSignIn ? "Sign In" : "Sign Up")
+        }
+    }
+
+    func signIn() {
+        guard !email.isEmpty, !password.isEmpty else {
+            self.errorMessage = "Please enter your email and password."
+            self.showError = true
+            return
+        }
+
+        Auth.auth().signIn(withEmail: email, password: password) { _, error in
+            if let error = error {
+                self.errorMessage = error.localizedDescription
+                self.showError = true
+            } else {
+                self.showError = false
+                self.errorMessage = ""
+                session.listen()
+            }
+        }
+    }
+
+    func signUp() {
+        guard !email.isEmpty, !password.isEmpty, !name.isEmpty else {
+            self.errorMessage = "Please fill in all required fields."
+            self.showError = true
+            return
+        }
+
+        Auth.auth().createUser(withEmail: email, password: password) { authResult, error in
+            if let error = error {
+                print("SignUp: Error creating user: \(error.localizedDescription)")
+                self.errorMessage = error.localizedDescription
+                self.showError = true
+                return
+            }
+
+            guard let user = authResult?.user else {
+                print("SignUp: No auth result user")
+                self.errorMessage = "Unexpected error occurred."
+                self.showError = true
+                return
+            }
+
+            print("SignUp: User created successfully with ID: \(user.uid)")
+            let db = Firestore.firestore()
+            var data: [String: Any] = [
+                "email": self.email,
+                "name": self.name,
+                "isParent": self.isParent,
+                "uid": user.uid
+            ]
+
+            if isParent {
+                let villageID = UUID().uuidString
+                data["villageID"] = villageID
+                print("SignUp: Creating village with ID: \(villageID)")
+
+                // Create village document
+                db.collection("villages").document(villageID).setData([
+                    "villageID": villageID,
+                    "name": "\(self.name)'s Village"
+                ]) { err in
+                    if let err = err {
+                        print("SignUp: Error creating village: \(err.localizedDescription)")
+                        self.errorMessage = err.localizedDescription
+                        self.showError = true
+                        return
+                    }
+
+                    print("SignUp: Village created successfully")
+                    // Add parent to village's parents subcollection
+                    db.collection("villages").document(villageID).collection("parents").document(user.uid).setData([
+                        "uid": user.uid,
+                        "name": self.name,
+                        "email": self.email,
+                        "fcmToken": Messaging.messaging().fcmToken ?? ""
+                    ]) { err in
+                        if let err = err {
+                            print("SignUp: Error adding parent to village: \(err.localizedDescription)")
+                            self.errorMessage = err.localizedDescription
+                            self.showError = true
+                            return
+                        }
+                        print("SignUp: Parent added to village")
+                        self.createUserDocument(db: db, user: user, data: data)
+                    }
+                }
+            } else {
+                print("SignUp: Creating kid user document")
+                self.createUserDocument(db: db, user: user, data: data)
+            }
+        }
+    }
+
+    private func createUserDocument(db: Firestore, user: User, data: [String: Any]) {
+        print("SignUp: Creating user document with data: \(data)")
+        db.collection("users").document(user.uid).setData(data) { err in
+            if let err = err {
+                print("SignUp: Error creating user document: \(err.localizedDescription)")
+                self.errorMessage = err.localizedDescription
+                self.showError = true
+                return
+            }
+
+            print("SignUp: User document created successfully")
+            DispatchQueue.main.async {
+                print("SignUp: Calling session.listen()")
+                self.session.listen()
+            }
+        }
+    }
+}
+// SignInView.swift
+
+import SwiftUI
+import FirebaseAuth
+import Firebase
+
+struct SignInView: View {
+    @State private var email = ""
+    @State private var password = ""
+    @State private var errorMessage = ""
+    @State private var showError = false
+    @EnvironmentObject var session: SessionStore
+    @Environment(\.presentationMode) var presentationMode
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                Text("Village - Sign In")
+                    .font(.largeTitle)
+                    .bold()
+
+                TextField("Email", text: $email)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .keyboardType(.emailAddress)
+                    .autocapitalization(.none)
+
+                SecureField("Password", text: $password)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                Button(action: {
+                    signIn()
+                }) {
+                    Text("Sign In")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding()
+                        .frame(width: 220, height: 60)
+                        .background(Color.green)
+                        .cornerRadius(15.0)
+                }
+
+                if showError {
+                    Text(errorMessage)
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.center)
+                }
+
+                Button(action: {
+                    self.presentationMode.wrappedValue.dismiss()
+                }) {
+                    Text("Don't have an account? Sign Up")
+                        .font(.subheadline)
+                }
+
+                Spacer()
+            }
+            .padding()
+        }
+    }
+
+    func signIn() {
+        guard !email.isEmpty, !password.isEmpty else {
+            self.errorMessage = "Please enter your email and password."
+            self.showError = true
+            return
+        }
+
+        Auth.auth().signIn(withEmail: email, password: password) { authResult, error in
+            if let error = error {
+                self.errorMessage = error.localizedDescription
+                self.showError = true
+            } else {
+                session.listen()
+                self.presentationMode.wrappedValue.dismiss()
+            }
+        }
+    }
+}
+// SignUpView.swift
+
+import SwiftUI
+import FirebaseAuth
+import Firebase
+
+struct SignUpView: View {
+    @State private var isParent = false
+    @State private var name = ""
+    @State private var email = ""
+    @State private var password = ""
+    @State private var errorMessage = ""
+    @State private var showError = false
+    @EnvironmentObject var session: SessionStore
+    @State private var showSignIn = false
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                Text("Village - Sign Up")
+                    .font(.largeTitle)
+                    .bold()
+
+                Picker("Role", selection: $isParent) {
+                    Text("Kid").tag(false)
+                    Text("Parent").tag(true)
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding()
+
+                TextField("Name", text: $name)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                TextField("Email", text: $email)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .keyboardType(.emailAddress)
+                    .autocapitalization(.none)
+
+                SecureField("Password", text: $password)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                Button(action: {
+                    signUp()
+                }) {
+                    Text("Sign Up")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding()
+                        .frame(width: 220, height: 60)
+                        .background(Color.blue)
+                        .cornerRadius(15.0)
+                }
+
+                if showError {
+                    Text(errorMessage)
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.center)
+                }
+
+                Button(action: {
+                    self.showSignIn = true
+                }) {
+                    Text("Already have an account? Sign In")
+                        .font(.subheadline)
+                }
+                .sheet(isPresented: $showSignIn) {
+                    SignInView()
+                        .environmentObject(session)
+                }
+
+                Spacer()
+            }
+            .padding()
+        }
+    }
+
+    func signUp() {
+        guard !name.isEmpty, !email.isEmpty, !password.isEmpty else {
+            self.errorMessage = "Please fill in all fields."
+            self.showError = true
+            return
+        }
+
+        Auth.auth().createUser(withEmail: email, password: password) { authResult, error in
+            if let error = error {
+                self.errorMessage = error.localizedDescription
+                self.showError = true
+            } else if let user = authResult?.user {
+                let db = Firestore.firestore()
+                db.collection("users").document(user.uid).setData([
+                    "name": self.name,
+                    "email": self.email,
+                    "isParent": self.isParent,
+                    "uid": user.uid
+                ]) { err in
+                    if let err = err {
+                        self.errorMessage = err.localizedDescription
+                        self.showError = true
+                    } else {
+                        session.listen()
+                    }
+                }
+            }
+        }
+    }
+}
+import SwiftUI
+import Firebase
+import FirebaseAppCheck
+
+@main
+struct VillageApp: App {
+    @StateObject var session = SessionStore()
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .environmentObject(session)
+        }
+    }
+}
+import SwiftUI
+import Firebase
+
+
+struct VillageView: View {
+    @EnvironmentObject var session: SessionStore
+    @State private var parentsList: [ParentUser] = []
+    @State private var kidsList: [Kid] = []
+    @State private var showingAddPersonSheet = false
+
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section(header: Text("Parents")) {
+                    ForEach(parentsList) { parent in
+                        Text(parent.name)
+                    }
+                }
+                Section(header: Text("Kids")) {
+                    ForEach(kidsList) { kid in
+                        Text(kid.name)
+                    }
+                }
+            }
+            .listStyle(GroupedListStyle())
+            .navigationTitle("Village")
+            .navigationBarItems(trailing: session.isParent ? Button(action: {
+                showingAddPersonSheet = true
+            }) {
+                Image(systemName: "person.badge.plus")
+            } : nil)
+            .onAppear {
+                fetchVillageMembers()
+            }
+            .sheet(isPresented: $showingAddPersonSheet) {
+                AddPersonView()
+                    .environmentObject(session)
+            }
+        }
+    }
+
+
+    func fetchVillageMembers() {
+        let db = Firestore.firestore()
+        guard let villageID = session.villageID else { return }
+
+
+        // Fetch parents
+        db.collection("villages").document(villageID).collection("parents")
+            .addSnapshotListener { snapshot, error in
+                if let error = error {
+                    print("Error fetching parents: \(error.localizedDescription)")
+                    return
+                }
+                parentsList = snapshot?.documents.compactMap { document in
+                    let data = document.data()
+                    let uid = data["uid"] as? String ?? UUID().uuidString
+                    let name = data["name"] as? String ?? "Unknown"
+                    let email = data["email"] as? String ?? ""
+                    return ParentUser(id: uid, name: name, email: email)
+                } ?? []
+            }
+
+
+        // Fetch kids
+        db.collection("villages").document(villageID).collection("kids")
+            .addSnapshotListener { snapshot, error in
+                if let error = error {
+                    print("Error fetching kids: \(error.localizedDescription)")
+                    return
+                }
+                kidsList = snapshot?.documents.compactMap { document in
+                    let data = document.data()
+                    let uid = data["uid"] as? String ?? UUID().uuidString
+                    let name = data["name"] as? String ?? "Unknown"
+                    let email = data["email"] as? String ?? ""
+                    return Kid(id: uid, name: name, email: email)
+                } ?? []
+            }
+    }
+}
